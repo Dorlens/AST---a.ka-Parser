@@ -123,64 +123,140 @@ class WatCompiler:
     # ----- TODO M5-M7 -----
 
     def compile_stmt(self, stmt):
-        # Note on formatting: self.indent only affects the leading whitespace
-        # in the emitted WAT and has no effect on the resulting wasm. If your
-        # output looks slightly different from the reference (extra or missing
-        # spaces inside `if`/`block`/`loop`), don't worry -- both are valid.
-        # Let:     compile_expr(stmt.expr); wat = self.declare_local(stmt.name);
-        #          self.emit(f"local.set {wat}")
-        # Assign:  compile_expr; self.emit(f"local.set {self.resolve(name)}")
-        # Block:   push_scope; compile each; pop_scope
-        # If:      compile cond; emit "if"; compile_stmt(then); (else: emit "else"; compile_stmt(else)); emit "end"
-        # While:   emit "block"; emit "loop"; cond; emit "i32.eqz"; emit "br_if 1";
-        #          compile body; emit "br 0"; emit "end"; emit "end"
-        # Return:  compile expr (or i32.const 0); emit "return"
-        # Print:   compile expr; emit "call $print"
-        # ExprStmt: compile expr; emit "drop"
-        # For Let, compile the initializer so the value is on the wasm stack.
-        # Declare the local to reserve its mangled `(local ...)` entry.
-        # Emit `local.set` for that local.
-        # For Assign, compile the right-hand side and emit `local.set` for resolve(name).
-        # For Block, push a new scope, compile nested statements, and pop in finally.
-        # For If, compile the condition, emit `if`, compile the then branch, optional `else`, and `end`.
-        # For While, emit `block` and `loop` before compiling the condition.
-        # In While, emit `i32.eqz` and `br_if 1` to leave the loop when the condition is false.
-        # Compile the body, emit `br 0` to repeat, then close both structures with `end`.
-        # For Return, compile the expression or `i32.const 0` for bare return, then emit `return`.
-        # For Print, compile the expression and emit `call $print`.
-        # For ExprStmt, compile the expression and emit `drop`.
-        # If no isinstance case matches, raise RuntimeError for the unknown statement node.
-        raise NotImplementedError("wat compile_stmt (M5-M7)")
+        if isinstance(stmt, P.Let):
+            self.compile_expr(stmt.expr)
+            wat = self.declare_local(stmt.name)
+
+            self.emit(f"local.set {wat}")
+        elif isinstance(stmt, P.Assign):
+            self.compile_expr(stmt.expr)
+            self.emit(f"local.set {self.resolve(stmt.name)}")
+
+        elif isinstance(stmt, P.Block):
+            self.push_scope()
+            try:
+                for s in stmt.statements:
+                    self.compile_stmt(s)
+            finally:
+                self.pop_scope()
+
+        elif isinstance(stmt, P.If):
+            self.compile_expr(stmt.cond)
+            self.emit("if")
+            self.indent += 1
+            self.compile_stmt(stmt.then_branch)
+            self.indent -= 1
+            if stmt.else_branch is not None:
+                self.emit("else")
+                self.indent += 1
+                self.compile_stmt(stmt.else_branch)
+                self.indent -= 1
+            self.emit("end")
+
+        elif isinstance(stmt, P.While):
+            self.emit("block")
+            self.indent += 1
+            self.emit("loop")
+            self.indent += 1
+            self.compile_expr(stmt.cond)
+            self.emit("i32.eqz")
+            self.emit("br_if 1")
+            self.compile_stmt(stmt.body)
+            self.emit("br 0")
+            self.indent -= 1
+            self.emit("end")
+            self.indent -= 1
+            self.emit("end")
+
+        elif isinstance(stmt, P.Return):
+            if stmt.expr is not None:
+                self.compile_expr(stmt.expr)
+            else:
+                self.emit("i32.const 0")
+            self.emit("return")
+
+        elif isinstance(stmt, P.Print):
+            self.compile_expr(stmt.expr)
+            self.emit("call $print")
+
+        elif isinstance(stmt, P.ExprStmt):
+            self.compile_expr(stmt.expr)
+            self.emit("drop")
+        else:
+         raise NotImplementedError("wat compile_stmt (M5-M7)")
 
     def compile_expr(self, expr):
-        # Number: emit f"i32.const {value}"
-        # Bool:   emit f"i32.const {1 if value else 0}"
-        # Var:    emit f"local.get {self.resolve(name)}"
-        # Unary - : emit "i32.const 0"; compile operand; emit "i32.sub"
-        # Unary ! : compile operand; emit "i32.eqz"
-        # Binary && (short-circuit):
-        #     compile left;
-        #     emit "if (result i32)"
-        #     compile right
-        #     emit "else"; emit "  i32.const 0"; emit "end"
-        # Binary || (short-circuit):
-        #     compile left;
-        #     emit "if (result i32)"; emit "  i32.const 1"
-        #     emit "else"; compile right; emit "end"
-        # Other binary: compile both sides; emit the right opcode from the
-        #     cheatsheet (i32.add / i32.sub / i32.mul / i32.div_s / i32.lt_s / etc.)
-        # Call:   compile each arg; emit f"call ${name}"
-        # For Number, emit `i32.const` with the integer value.
-        # For Bool, emit `i32.const 1` for true or `i32.const 0` for false.
-        # For Var, emit `local.get` for resolve(name).
-        # For Unary `-`, emit zero, compile the operand, then emit `i32.sub`.
-        # For Unary `!`, compile the operand, then emit `i32.eqz`.
-        # For Binary `&&`, compile left and use `if (result i32)` to short-circuit false.
-        # For Binary `||`, compile left and use `if (result i32)` to short-circuit true.
-        # For other Binary operators, compile left then right and emit the matching WAT opcode.
-        # For Call, compile arguments left-to-right, then emit `call $name`.
-        # If no isinstance case matches, raise RuntimeError for the unknown expression node.
-        raise NotImplementedError("wat compile_expr (M5-M7)")
+        if isinstance(expr, P.Number):
+            self.emit(f"i32.const {expr.value}")
+
+        elif isinstance(expr, P.Bool):
+            self.emit(f"i32.const {1 if expr.value else 0}")
+
+        elif isinstance(expr, P.Var):
+            self.emit(f"local.get {self.resolve(expr.name)}")
+
+        elif isinstance(expr, P.Unary):
+            if expr.op == "-":
+                self.emit("i32.const 0")
+                self.compile_expr(expr.expr)
+                self.emit("i32.sub")
+
+            elif expr.op == "!":
+                self.compile_expr(expr.expr)
+                self.emit("i32.eqz")
+            else:
+
+                raise RuntimeError(f"wat_codegen: unknown unary op {expr.op}")
+        elif isinstance(expr, P.Binary):
+            if expr.op == "&&":
+                self.compile_expr(expr.left)
+                self.emit("if (result i32)")
+                self.indent += 1
+                self.compile_expr(expr.right)
+                self.indent -= 1
+                self.emit("else")
+                self.indent += 1
+                self.emit("i32.const 0")
+                self.indent -= 1
+                self.emit("end")
+
+            elif expr.op == "||":
+                self.compile_expr(expr.left)
+                self.emit("if (result i32)")
+                self.indent += 1
+                self.emit("i32.const 1")
+                self.indent -= 1
+                self.emit("else")
+                self.indent += 1
+                self.compile_expr(expr.right)
+                self.indent -= 1
+                self.emit("end")
+            else:
+                self.compile_expr(expr.left)
+                self.compile_expr(expr.right)
+                ops = {
+
+                    "+": "i32.add",
+                    "-": "i32.sub",
+                    "*": "i32.mul",
+                    "/": "i32.div_s",
+                    "==": "i32.eq",
+                    "!=": "i32.ne",
+                    "<": "i32.lt_s",
+                    "<=": "i32.le_s",
+                    ">": "i32.gt_s",
+                    ">=": "i32.ge_s",
+                }
+                if expr.op not in ops:
+                    raise RuntimeError(f"wat_codegen: unknown binary op {expr.op}")
+                self.emit(ops[expr.op])
+
+        elif isinstance(expr, P.Call):
+            for arg in expr.args:
+                self.compile_expr(arg)
+            self.emit(f"call ${expr.name}")
+        else:
+            raise NotImplementedError("wat compile_expr (M5-M7)")
 
 
 def compile_(program):
